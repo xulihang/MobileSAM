@@ -13,10 +13,19 @@ def show_mask(mask, ax):
     ax.imshow(mask_image)
     
 def show_points(coords, labels, ax, marker_size=375):
-    pos_points = coords[labels==1]
-    neg_points = coords[labels==0]
-    ax.scatter(pos_points[:, 0], pos_points[:, 1], color='green', marker='*', s=marker_size, edgecolor='white', linewidth=1.25)
-    ax.scatter(neg_points[:, 0], neg_points[:, 1], color='red', marker='*', s=marker_size, edgecolor='white', linewidth=1.25)   
+    # coords: (N,2), labels: (N,)
+    coords = np.array(coords)
+    labels = np.array(labels)
+    if coords.size == 0 or labels.size == 0:
+        return
+    pos_mask = labels == 1
+    neg_mask = labels == 0
+    if np.any(pos_mask):
+        pos_points = coords[pos_mask]
+        ax.scatter(pos_points[:, 0], pos_points[:, 1], color='green', marker='*', s=marker_size, edgecolor='white', linewidth=1.25)
+    if np.any(neg_mask):
+        neg_points = coords[neg_mask]
+        ax.scatter(neg_points[:, 0], neg_points[:, 1], color='red', marker='*', s=marker_size, edgecolor='white', linewidth=1.25)
     
 def show_box(box, ax):
     x0, y0 = box[0], box[1]
@@ -124,86 +133,95 @@ else:
     tensor, scale, (res_h, res_w) = preprocess_for_encoder(image, target_size=target_size)
     # For raw image input we will feed `tensor` under the detected raw_input_name later.
 
-# prepare prompt: use a bounding box plus a point+label as provided by the user
-# box format: [x0, y0, x1, y1] in original image coordinates
-input_box = np.array([210, 200, 350, 500], dtype=np.float32)
-input_point = np.array([[275, 400]], dtype=np.float32)  # x,y in original image coords
-input_label = np.array([0], dtype=np.float32)
+def infer(box, point):
+    # prepare prompt: use a bounding box plus a point+label as provided by the user
+    # box format: [x0, y0, x1, y1] in original image coordinates
+    input_box = np.array(box, dtype=np.float32)
+    input_point = np.array([point], dtype=np.float32)  # x,y in original image coords
+    input_label = np.array([0], dtype=np.float32)
 
-# Build box corner coords and labels (labels 2,3 for box corners as requested)
-onnx_box_coords = input_box.reshape(2, 2).astype(np.float32)  # [[x0,y0],[x1,y1]]
-onnx_box_labels = np.array([2, 3], dtype=np.float32)
+    # Build box corner coords and labels (labels 2,3 for box corners as requested)
+    onnx_box_coords = input_box.reshape(2, 2).astype(np.float32)  # [[x0,y0],[x1,y1]]
+    onnx_box_labels = np.array([2, 3], dtype=np.float32)
 
-# Concatenate point and box corner coords/labels, add batch dim
-onnx_coord = np.concatenate([input_point.astype(np.float32), onnx_box_coords], axis=0)[None, :, :]
-onnx_label = np.concatenate([input_label.astype(np.float32), onnx_box_labels], axis=0)[None, :].astype(np.float32)
-
-# transform coords to encoder's resized/padded space
-# use scale produced by preprocessing; if not computed above, compute here with default target_size
-try:
-    scale  # noqa: F821
-except NameError:
-    # compute scale as target_size / max(orig)
-    target_size = target_size if 'target_size' in locals() else 1024
-    scale = target_size / max(image.shape[:2])
-
-# apply our transform (equivalent to predictor.transform.apply_coords)
-onnx_coord = transform_coords(onnx_coord[0], image.shape[:2], scale)[None, :, :].astype(np.float32)
-
-onnx_mask_input = np.zeros((1, 1, 256, 256), dtype=np.float32)
-onnx_has_mask_input = np.zeros((1,), dtype=np.float32)
-
-# Build inputs dict according to what the main ONNX expects
-ort_inputs = {}
-for inp in ort_session.get_inputs():
-    name = inp.name
-    if name == "image_embeddings":
-        ort_inputs[name] = image_embeddings
-    elif name in ("point_coords", "point_coordinates", "point_coords_coord"):
-        ort_inputs[name] = onnx_coord
-    elif name in ("point_labels", "point_label"):
-        ort_inputs[name] = onnx_label
-    elif name == "mask_input":
-        ort_inputs[name] = onnx_mask_input
-    elif name == "has_mask_input":
-        ort_inputs[name] = onnx_has_mask_input
-    elif name in ("orig_im_size", "original_size", "orig_size"):
-        ort_inputs[name] = np.array(image.shape[:2], dtype=np.float32)
+    # If the user provided no points, use only the box corners as prompts.
+    # Otherwise concatenate user points + box corners as before.
+    if input_point is None or input_point.size == 0:
+        onnx_coord = onnx_box_coords[None, :, :]
+        onnx_label = onnx_box_labels[None, :].astype(np.float32)
     else:
-        # If ONNX expects raw image (we preprocessed into `tensor`) feed it
-        if 'tensor' in locals() and name == raw_input_name:
-            ort_inputs[name] = tensor
-        # otherwise skip or fill zeros for optional inputs
+        onnx_coord = np.concatenate([input_point.astype(np.float32), onnx_box_coords], axis=0)[None, :, :]
+        onnx_label = np.concatenate([input_label.astype(np.float32), onnx_box_labels], axis=0)[None, :].astype(np.float32)
+
+    # transform coords to encoder's resized/padded space
+    # use scale produced by preprocessing; if not computed above, compute here with default target_size
+    try:
+        scale  # noqa: F821
+    except NameError:
+        # compute scale as target_size / max(orig)
+        target_size = target_size if 'target_size' in locals() else 1024
+        scale = target_size / max(image.shape[:2])
+
+    # apply our transform (equivalent to predictor.transform.apply_coords)
+    onnx_coord = transform_coords(onnx_coord[0], image.shape[:2], scale)[None, :, :].astype(np.float32)
+
+    onnx_mask_input = np.zeros((1, 1, 256, 256), dtype=np.float32)
+    onnx_has_mask_input = np.zeros((1,), dtype=np.float32)
+
+    # Build inputs dict according to what the main ONNX expects
+    ort_inputs = {}
+    for inp in ort_session.get_inputs():
+        name = inp.name
+        if name == "image_embeddings":
+            ort_inputs[name] = image_embeddings
+        elif name in ("point_coords", "point_coordinates", "point_coords_coord"):
+            ort_inputs[name] = onnx_coord
+        elif name in ("point_labels", "point_label"):
+            ort_inputs[name] = onnx_label
+        elif name == "mask_input":
+            ort_inputs[name] = onnx_mask_input
+        elif name == "has_mask_input":
+            ort_inputs[name] = onnx_has_mask_input
+        elif name in ("orig_im_size", "original_size", "orig_size"):
+            ort_inputs[name] = np.array(image.shape[:2], dtype=np.float32)
         else:
-            # Try to create a dummy array matching expected shape
-            shp = []
-            for s in inp.shape:
-                if isinstance(s, str) or s is None:
-                    shp.append(1)
-                else:
-                    shp.append(int(s))
-            ort_inputs[name] = np.zeros(tuple(shp), dtype=np.float32)
+            # If ONNX expects raw image (we preprocessed into `tensor`) feed it
+            if 'tensor' in locals() and name == raw_input_name:
+                ort_inputs[name] = tensor
+            # otherwise skip or fill zeros for optional inputs
+            else:
+                # Try to create a dummy array matching expected shape
+                shp = []
+                for s in inp.shape:
+                    if isinstance(s, str) or s is None:
+                        shp.append(1)
+                    else:
+                        shp.append(int(s))
+                ort_inputs[name] = np.zeros(tuple(shp), dtype=np.float32)
 
-# Run inference. Try to match the pattern masks, _, _ = ort_session.run(...). Fall back if the model returns fewer outputs.
-try:
-    masks, _, _ = ort_session.run(None, ort_inputs)
-except Exception:
-    outs = ort_session.run(None, ort_inputs)
-    masks = outs[0]
+    # Run inference. Try to match the pattern masks, _, _ = ort_session.run(...). Fall back if the model returns fewer outputs.
+    try:
+        masks, _, _ = ort_session.run(None, ort_inputs)
+    except Exception:
+        outs = ort_session.run(None, ort_inputs)
+        masks = outs[0]
 
-# apply threshold; choose a default threshold (user can adjust)
-mask_threshold = 0.0
-masks = masks > mask_threshold
-# masks may be in model's output resolution; resize to original image for visualization
-# pick first mask in batch and first channel
-mask = masks[0, 0].astype(np.uint8)  # may be float bool
-mask_resized = cv2.resize(mask, (image.shape[1], image.shape[0]), interpolation=cv2.INTER_NEAREST)
+    # apply threshold; choose a default threshold (user can adjust)
+    mask_threshold = 0.0
+    masks = masks > mask_threshold
+    # masks may be in model's output resolution; resize to original image for visualization
+    # pick first mask in batch and first channel
+    mask = masks[0, 0].astype(np.uint8)  # may be float bool
+    mask_resized = cv2.resize(mask, (image.shape[1], image.shape[0]), interpolation=cv2.INTER_NEAREST)
 
-plt.figure(figsize=(10,10))
-plt.imshow(image)
-show_mask(mask_resized, plt.gca())
-show_points(input_point, input_label, plt.gca())
-# draw the provided box on top of the image (box is in original image coords)
-show_box(input_box, plt.gca())
-plt.axis('off')
-plt.show()
+    plt.figure(figsize=(10,10))
+    plt.imshow(image)
+    show_mask(mask_resized, plt.gca())
+    show_points(input_point, input_label, plt.gca())
+    # draw the provided box on top of the image (box is in original image coords)
+    show_box(input_box, plt.gca())
+    plt.axis('off')
+    plt.show()
+
+infer([210, 200, 350, 500], [275, 400])  # example box and point
+infer([380, 230, 480, 520], [425, 400])
