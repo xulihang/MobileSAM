@@ -58,16 +58,16 @@ def transform_coords(coords, orig_size, scale):
     return transformed
 
 # paths
-onnx_model_path = "sam_onnx_example.onnx"
+onnx_model_path = "decoder.onnx"
 # optional image encoder onnx (if main ONNX already takes embeddings this will be used to compute them)
-encoder_onnx_path = "sam_image_encoder.onnx"  # place encoder ONNX here if needed
+encoder_onnx_path = "encoder.onnx"  # place encoder ONNX here if needed
 if not os.path.exists(onnx_model_path):
     raise FileNotFoundError(f"ONNX model not found: {onnx_model_path}")
 
 ort_session = onnxruntime.InferenceSession(onnx_model_path)
 
 # read image
-image_path = 'notebooks/images/picture2.jpg'
+image_path = 'picture2.jpg'
 image = cv2.imread(image_path)
 if image is None:
     raise FileNotFoundError(f"Image not found: {image_path}")
