@@ -223,5 +223,5 @@ def infer(box, point):
     plt.axis('off')
     plt.show()
 
-infer([210, 200, 350, 500], [275, 400])  # example box and point
-infer([380, 230, 480, 520], [425, 400])
+infer([210, 200, 350, 500], [])  # example box and point
+infer([380, 230, 480, 520], [])
